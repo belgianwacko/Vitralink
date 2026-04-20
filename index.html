@@ -250,6 +250,18 @@ function getGameHistory(){try{return JSON.parse(localStorage.getItem('vitralink_
 let timerSec=CFG.START_TIME, lastTimerTick=0, timerFrozen=false;
 let gameOver=false, gameStartTime=0, elapsedPlaySec=0, finalRealDur=0;
 let totalPausedMs=0, pauseStartTime=0; // track real time spent paused
+function resumeAnimAfterPause(){
+  // When resuming after any pause-like state (popup, manual pause, tutorial),
+  // shift animStart and per-slot drop timestamps forward by the paused duration
+  // so animations continue from where they left off, not from wall-clock elapsed.
+  if(pauseStartTime>0&&animPhase!=='idle'){
+    const pausedDur=performance.now()-pauseStartTime;
+    animStart+=pausedDur;
+    if(droppingSlots&&droppingSlots.length){
+      for(const d of droppingSlots){if(d.startTime!==undefined)d.startTime+=pausedDur;}
+    }
+  }
+}
 function realElapsedMs(){
   if(!gameStarted)return 0;
   let ms=performance.now()-gameStartTime-totalPausedMs;
@@ -283,6 +295,7 @@ let musicMenuOpen=false;
 let musicMenuBtns=[];
 let rulesScrollY=0, rulesMaxScroll=0, rulesTouchStartY=0, rulesTouchDragged=false, rulesOpenedAt=0;
 let btnPause=null, btnRules=null, btnTutToggle=null, btnRestart=null, btnMute=null, btnMusic=null;
+let topButtonsBottomY=0; // tracked by drawTopBar so the ticker knows where to sit
 let btnEndSession=null, btnBackMenu=null;
 let btnPauseConfirmYes=null, btnPauseConfirmNo=null;
 let btnLoadoutDontShow=null;
@@ -362,7 +375,7 @@ function dismissTut(){
   tutActive=null;
   if(tutQueue.length>0){nextTut();}
   else{
-    if(pauseStartTime>0){totalPausedMs+=performance.now()-pauseStartTime;pauseStartTime=0;}
+    if(pauseStartTime>0){resumeAnimAfterPause();totalPausedMs+=performance.now()-pauseStartTime;pauseStartTime=0;}
     const now=performance.now();
     lastTimerTick=now;lastHeatCoolTick=now;lastActionTime=now;
     lastPowerSpawn=now;lastCurseSpawn=now;lastRainbowSpawn=now;lastBlazeSpawn=now;lastHourglassSpawn=now;
@@ -419,6 +432,8 @@ let lastHourglassSpawn=0;
 // Hourglass active state
 let hourglassFreeze=0; // seconds remaining of free play
 let hourglassFreezeStart=0;
+// Long-press radial menu state
+let lpTimer=null,lpSlot=-1,lpX=0,lpY=0,lpMenuActive=false,lpStartPos=null;
 
 // Animation pipeline
 let animPhase='idle'; // 'idle','flash','hole','dropping','morphing','settling','shuffling'
@@ -1265,8 +1280,18 @@ function cycleMusicMood(){
 }
 
 function addPanelMsg(t,c,d){
-  panelMsgs.push({text:t,color:c,addedAt:performance.now(),duration:d||2000});
-  if(panelMsgs.length>4)panelMsgs.shift();
+  // Stagger messages added in rapid succession so they don't flash by faster than readable.
+  // Each message gets at least 800ms of "fresh" time on screen before the next can take over.
+  const STAGGER=800;
+  const MIN_DUR=2000;
+  let addedAt=performance.now();
+  if(panelMsgs.length>0){
+    const last=panelMsgs[panelMsgs.length-1];
+    const lastFresh=last.addedAt+STAGGER;
+    if(addedAt<lastFresh)addedAt=lastFresh;
+  }
+  panelMsgs.push({text:t,color:c,addedAt,duration:Math.max(MIN_DUR,d||2000)});
+  if(panelMsgs.length>6)panelMsgs.shift();
   // Auto-trigger sounds from message content
   if(t.includes('POWER GEM'))SFX.powerGem();
   else if(t.includes('CURSED'))SFX.curseHit();
@@ -1279,6 +1304,20 @@ function addPanelMsg(t,c,d){
 //  SCORING
 // ================================================================
 function calcScore(n){return Math.round(10*n*(CFG.MULT[n]||CFG.MULT_MAX));}
+// Adds time to the timer; any seconds that would exceed TIMER_CAP convert to score
+// at 1000 pts/sec, ensuring time grants are never wasted when the player is at cap.
+function grantTime(amt){
+  if(amt<=0||!MODES[gameMode].timed)return;
+  const room=Math.max(0,CFG.TIMER_CAP-timerSec);
+  const used=Math.min(amt,room);
+  const overflow=amt-used;
+  if(used>0)timerSec+=used;
+  if(overflow>0){
+    const bonus=overflow*1000;
+    score+=bonus;
+    addPanelMsg('+'+bonus.toLocaleString()+' (time overflow)','#ffcc66',1800);
+  }
+}
 function calcTimeBonus(n){
   let b=0;for(const[t,s]of Object.entries(CFG.TIME_BASE))if(n>=parseInt(t))b=s;
   if(b<=0)return 0;
@@ -1396,7 +1435,7 @@ function tickSpecialGems(){
         const cp=getCursePenalty();
         gs.cursesExpired++;
         if(cp>0){timerSec=Math.max(0,timerSec-cp);addPanelMsg('💀 CURSED! −'+cp+'s','#ff4444',2500);}
-        else if(cp<0){timerSec=Math.min(timerSec+Math.abs(cp),CFG.TIMER_CAP);addPanelMsg('✦ Curse absorbed! +'+Math.abs(cp)+'s','#66ff88',2500);}
+        else if(cp<0){grantTime(Math.abs(cp));addPanelMsg('✦ Curse absorbed! +'+Math.abs(cp)+'s','#66ff88',2500);}
         else{addPanelMsg('💀 Curse nullified!','#aabbcc',2000);}
         if(timerSec<=0&&!chainOn){triggerGameOver();}
         clearSpecial(ci);
@@ -1546,7 +1585,7 @@ function resize(){
   const minDim=Math.min(W,H);
   uiS=Math.min(1.8,Math.max(1,minDim/(W>H*1.15?620:420)));
   bCX=W/2;
-  const topPH=Math.round(96*uiS),botPH=Math.round(120*uiS);
+  const topPH=Math.round(116*uiS),botPH=Math.round(120*uiS);
   bCY=topPH+(H-topPH-botPH)/2;
   const effRad=CFG.HEX_GEN_RINGS*CFG.BOARD_PIX_FRAC,diam=effRad*2+1;
   cSz=Math.min((W*0.92)/(1.5*diam+0.5),(H-topPH-botPH-8)/(S3*diam));
@@ -1915,11 +1954,11 @@ function useShatter(si){
     s.isHole=true;s.ci=-1;s.holeFade=1;s.special=null;s.specialCD=0;s.specialTick=0;s.rainbow=false;
   }
   if(extraPts>0){const os=score;score+=extraPts;gs.scoreFromShatter+=extraPts;checkScoreMile(os,score);}
-  if(extraTime>0)timerSec=Math.min(timerSec+extraTime,CFG.TIMER_CAP);
+  if(extraTime>0)grantTime(extraTime);
   addPanelMsg('⚡ SHATTER ×'+cnt,'#ffaa44',2000);deadlocked=false;
   // Storm Forge: shatter adds time
   const stormTime=getShatterTimeBonus();
-  if(stormTime>0&&MODES[gameMode].timed){timerSec=Math.min(timerSec+stormTime,CFG.TIMER_CAP);addPanelMsg('+'+stormTime+'s','#ffcc44',1500);}
+  if(stormTime>0&&MODES[gameMode].timed){grantTime(stormTime);addPanelMsg('+'+stormTime+'s','#ffcc44',1500);}
   // Storm Forge: +1 fragment per 10 total gems shattered (cumulative across all shatters)
   const prevStorm=Math.floor(fragState.stormShatteredTotal/10);
   fragState.stormShatteredTotal+=cnt;
@@ -2034,7 +2073,7 @@ function endC(){
         }else{
           gs.cursesExpired++;
           if(cp>0){timerSec=Math.max(0,timerSec-cp);addPanelMsg('💀 CURSED! −'+cp+'s (need '+cmc+')','#ff4444',2500);}
-          else if(cp<0){timerSec=Math.min(timerSec+Math.abs(cp),CFG.TIMER_CAP);addPanelMsg('✦ Curse absorbed! +'+Math.abs(cp)+'s','#66ff88',2500);}
+          else if(cp<0){grantTime(Math.abs(cp));addPanelMsg('✦ Curse absorbed! +'+Math.abs(cp)+'s','#66ff88',2500);}
           else{addPanelMsg('💀 Curse nullified!','#aabbcc',2000);}
           showTut('err_curse_short');
         }
@@ -2104,7 +2143,9 @@ function endC(){
         // Shatter: 1st charge earned instantly when heat reaches max — only if empty AND off cooldown
         if(heat>=CFG.HEAT_MAX&&!wasMax){
           heatStreakMs=realElapsedMs();heatStreakAwards=0; // start sustained clock
-          const cooldownOk=(realElapsedMs()-lastShatterEarnedMs)>=10000;
+          // Cooldown scales with run length: +5s per 120s survived (base 10s)
+          const dynCooldown=10000+Math.floor(realElapsedMs()/120000)*5000;
+          const cooldownOk=(realElapsedMs()-lastShatterEarnedMs)>=dynCooldown;
           if(shatterCharges===0&&cooldownOk){
             shatterCharges++;heatStreakAwards=1;gs.shattersEarned++;lastShatterEarnedMs=realElapsedMs();
             shatterEarnedFlashAt=performance.now();
@@ -2139,7 +2180,7 @@ function endC(){
     }
     if(MODES[gameMode].timed){
       const bonus=calcTimeBonus(len)+bonusTime;
-      if(bonus>0)timerSec=Math.min(timerSec+bonus,CFG.TIMER_CAP);
+      if(bonus>0)grantTime(bonus);
       let msg='+'+pts;if(bonus>0)msg+='   +'+bonus+'s';
       if(hasHeatMech()){const hGain2=calcHeatGain(len);if(hGain2>0)msg+='   🔥+'+hGain2;}
       addPanelMsg(msg,'#ffffff',2500);
@@ -2607,7 +2648,7 @@ function tickColorClear(){
     if(batch<total)setTimeout(nextBatch,CFG.CC_WAVE_INTERVAL);
     else{
       if(ccExtraPts>0){const os=score;score+=ccExtraPts;gs.scoreFromColorClear+=ccExtraPts;checkScoreMile(os,score);}
-      if(ccExtraTime>0)timerSec=Math.min(timerSec+ccExtraTime,CFG.TIMER_CAP);
+      if(ccExtraTime>0)grantTime(ccExtraTime);
       // Aurora T3: rainbow survives color clears — force respawn
       if(getRainbowSurvivesCC())lastRainbowSpawn=0;
       setTimeout(()=>{pendingColorClear=null;startGravityDrop();},150);
@@ -2832,8 +2873,8 @@ function tickRealClock(){
       fragState.emberAwarded=shouldHave;
     }
   }
-  // Twilight: +1 fragment every 90 real seconds survived
-  const twMin=Math.floor(rSec/90);
+  // Twilight: +1 fragment every 30 real seconds survived
+  const twMin=Math.floor(rSec/30);
   if(twMin>fragState.lastTwilightMin){
     gs.frag.twilight+=(twMin-fragState.lastTwilightMin);
     fragState.lastTwilightMin=twMin;
@@ -2879,6 +2920,28 @@ let catSel=-1,catDetail=false,catSwap=-1,catFocSwap=-1,catPieces=[],catLeads=[],
 let catHelpOpen=false;
 let catBtnHelp=null,catBtnHelpClose=null;
 let catBtnLoadoutToggle=null;
+let catBtnExportSave=null,catBtnImportSave=null;
+function processImport(raw){
+  let inp=(raw||'').trim().replace(/^["'`]+|["'`]+$/g,'');
+  if(!inp.startsWith('VITRALINK_SAVE_v1:')){
+    window.alert('Import failed: file must start with VITRALINK_SAVE_v1:\n\nGot:\n'+inp.slice(0,40)+'…');
+    return;
+  }
+  let data;
+  try{
+    const b64=inp.slice('VITRALINK_SAVE_v1:'.length);
+    const json=decodeURIComponent(escape(atob(b64)));
+    data=JSON.parse(json);
+  }catch(e){window.alert('Import failed during decode: '+e.message);return;}
+  if(!data||typeof data!=='object'){window.alert('Import failed: decoded data is not an object.');return;}
+  if(window.confirm('Replace ALL current progress with the imported save? This cannot be undone.')){
+    for(const k of Object.keys(localStorage)){
+      if(k.startsWith('vitralink_v2_'))localStorage.removeItem(k);
+    }
+    for(const[k,v]of Object.entries(data))localStorage.setItem(k,v);
+    location.reload();
+  }
+}
 let lastTierUps=[];
 const CAT_MAX_FOCUS=3;
 
@@ -3148,7 +3211,7 @@ function drawOculus(){
 function catDrawHelp(f,Rn){
   // Full-screen backdrop
   cx.fillStyle='rgba(5,8,18,0.9)';cx.fillRect(0,0,W,H);
-  const pw=Math.min(Rn(380),W*0.92),ph=Math.min(Rn(540),H*0.88);
+  const pw=Math.min(Rn(380),W*0.92),ph=Math.min(Rn(580),H*0.92);
   const px=W/2-pw/2,py=H/2-ph/2;
   cx.fillStyle='rgba(16,22,44,0.98)';cx.beginPath();cx.roundRect(px,py,pw,ph,Rn(16));cx.fill();
   cx.strokeStyle='rgba(180,150,80,0.3)';cx.lineWidth=1;cx.beginPath();cx.roundRect(px,py,pw,ph,Rn(16));cx.stroke();
@@ -3230,6 +3293,20 @@ function catDrawHelp(f,Rn){
   cx.fillText('Pre-game loadout popup: '+(settings.loadoutPopup?'ON':'OFF'),togX+Rn(28),togY+togH/2+Rn(4));
   catBtnLoadoutToggle={x:togX,y:togY,w:togW,h:togH};
   y+=togH+Rn(8);
+
+  // Export / Import save buttons
+  const sbW=(togW-Rn(8))/2,sbH=Rn(28);
+  const expX=togX,impX=togX+sbW+Rn(8),sbY=y;
+  cx.fillStyle='rgba(80,140,200,0.18)';cx.beginPath();cx.roundRect(expX,sbY,sbW,sbH,Rn(7));cx.fill();
+  cx.strokeStyle='rgba(120,180,230,0.45)';cx.lineWidth=1;cx.beginPath();cx.roundRect(expX,sbY,sbW,sbH,Rn(7));cx.stroke();
+  cx.font=`${Rn(11)}px ${f}`;cx.textAlign='center';cx.fillStyle='#aaccee';
+  cx.fillText('Export Save',expX+sbW/2,sbY+sbH/2+Rn(4));
+  cx.fillStyle='rgba(200,140,80,0.18)';cx.beginPath();cx.roundRect(impX,sbY,sbW,sbH,Rn(7));cx.fill();
+  cx.strokeStyle='rgba(230,180,120,0.45)';cx.lineWidth=1;cx.beginPath();cx.roundRect(impX,sbY,sbW,sbH,Rn(7));cx.stroke();
+  cx.fillStyle='#eecc99';cx.fillText('Import Save',impX+sbW/2,sbY+sbH/2+Rn(4));
+  catBtnExportSave={x:expX,y:sbY,w:sbW,h:sbH};
+  catBtnImportSave={x:impX,y:sbY,w:sbW,h:sbH};
+  y+=sbH+Rn(8);
 
   // Hint bottom
   cx.font=`italic ${Rn(10)}px ${f}`;cx.textAlign='center';cx.fillStyle='rgba(150,160,190,0.5)';
@@ -3410,10 +3487,57 @@ function catHandleTap(p){
     if(catBtnLoadoutToggle&&hitBtn(catBtnLoadoutToggle,p)){
       settings.loadoutPopup=!settings.loadoutPopup;saveSettings();return true;
     }
+    if(catBtnExportSave&&hitBtn(catBtnExportSave,p)){
+      const data={};
+      for(const k of Object.keys(localStorage)){
+        if(k.startsWith('vitralink_v2_'))data[k]=localStorage.getItem(k);
+      }
+      // Unicode-safe base64: encode UTF-8 first, then base64
+      const json=JSON.stringify(data);
+      const b64=btoa(unescape(encodeURIComponent(json)));
+      const blob='VITRALINK_SAVE_v1:'+b64;
+      // Trigger a .txt file download — reliable on mobile, no length limit
+      try{
+        const fileBlob=new Blob([blob],{type:'text/plain'});
+        const url=URL.createObjectURL(fileBlob);
+        const a=document.createElement('a');
+        const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+        a.href=url;a.download='vitralink-save-'+ts+'.txt';
+        document.body.appendChild(a);a.click();document.body.removeChild(a);
+        setTimeout(()=>URL.revokeObjectURL(url),1000);
+        addPanelMsg('Save downloaded','#aaccee',2500);
+      }catch(e){
+        // Fallback for environments without Blob/download support
+        window.prompt('Copy this save string (download unavailable):',blob);
+      }
+      return true;
+    }
+    if(catBtnImportSave&&hitBtn(catBtnImportSave,p)){
+      // Prefer file picker (mobile-friendly, no length limit). Fall back to prompt.
+      const fileInp=document.createElement('input');
+      fileInp.type='file';fileInp.accept='.txt,text/plain';
+      fileInp.style.display='none';
+      fileInp.onchange=(ev)=>{
+        const file=ev.target.files&&ev.target.files[0];
+        if(!file){document.body.removeChild(fileInp);return;}
+        const reader=new FileReader();
+        reader.onload=()=>{
+          document.body.removeChild(fileInp);
+          processImport(String(reader.result||''));
+        };
+        reader.onerror=()=>{
+          document.body.removeChild(fileInp);
+          window.alert('Could not read the file.');
+        };
+        reader.readAsText(file);
+      };
+      document.body.appendChild(fileInp);fileInp.click();
+      return true;
+    }
     if(catBtnHelpClose&&hitBtn(catBtnHelpClose,p)){catHelpOpen=false;return true;}
     // Tap outside the panel area closes; tap inside is ignored (so interactions don't dismiss)
     const s=uiS,Rn=n=>Math.round(n*s);
-    const pw=Math.min(Rn(380),W*0.92),ph=Math.min(Rn(540),H*0.88);
+    const pw=Math.min(Rn(380),W*0.92),ph=Math.min(Rn(580),H*0.92);
     const px=W/2-pw/2,py=H/2-ph/2;
     if(p.x<px||p.x>px+pw||p.y<py||p.y>py+ph){catHelpOpen=false;return true;}
     return true;
@@ -3856,7 +3980,7 @@ function render(){
   // Milestone celebration overlay
   drawCeleb();
 
-  drawTopBar();drawBottomPanel();
+  drawTopBar();drawMessageTicker();drawBottomPanel();
   // Repaint chain + color wheel overlay
   if(repaintSelected.length>0){
     // Dim the board
@@ -3924,6 +4048,67 @@ function render(){
   else if(paused)drawPause();
   else if(showRules)drawRules();
   else if(deadlocked&&animPhase==='idle')drawDeadlock();
+
+  // Long-press radial menu
+  if(lpMenuActive&&!gameOver&&!paused&&!tutActive){
+    const f2='"SF Pro Display","Segoe UI",system-ui,sans-serif';
+    const hasSh=shatterCharges>0,hasRp=repaintCharges>0;
+    const opts=[];
+    if(hasSh)opts.push('shatter');
+    if(hasRp)opts.push('repaint');
+    if(opts.length===0){lpMenuActive=false;}
+    else{
+      // Dim background slightly
+      cx.fillStyle='rgba(8,12,30,0.35)';cx.fillRect(0,0,W,H);
+      const optR=cSz*0.7,optDist=cSz*1.6;
+      for(let i=0;i<opts.length;i++){
+        const angle=opts.length===1?-Math.PI/2:(i===0?-Math.PI*0.7:-Math.PI*0.3);
+        const ox=lpX+Math.cos(angle)*optDist,oy=lpY+Math.sin(angle)*optDist;
+        // Circle background
+        cx.save();
+        cx.shadowColor=opts[i]==='shatter'?'rgba(255,170,40,0.7)':'rgba(100,200,255,0.7)';
+        cx.shadowBlur=12;
+        const g=cx.createRadialGradient(ox,oy,0,ox,oy,optR);
+        if(opts[i]==='shatter'){
+          g.addColorStop(0,'rgba(255,200,80,0.9)');g.addColorStop(1,'rgba(200,120,20,0.8)');
+        }else{
+          g.addColorStop(0,'rgba(100,200,255,0.9)');g.addColorStop(1,'rgba(40,120,200,0.8)');
+        }
+        cx.fillStyle=g;cx.beginPath();cx.arc(ox,oy,optR,0,Math.PI*2);cx.fill();
+        cx.shadowBlur=0;
+        cx.strokeStyle='rgba(255,255,255,0.4)';cx.lineWidth=1.5;
+        cx.beginPath();cx.arc(ox,oy,optR,0,Math.PI*2);cx.stroke();
+        cx.restore();
+        // Icon
+        cx.fillStyle='rgba(255,255,255,0.95)';
+        if(opts[i]==='shatter'){
+          // Lightning bolt
+          const s=optR*0.55;
+          cx.beginPath();cx.moveTo(ox+s*0.1,oy-s*0.8);cx.lineTo(ox+s*0.4,oy-s*0.8);
+          cx.lineTo(ox+s*0.05,oy-s*0.05);cx.lineTo(ox+s*0.35,oy-s*0.05);
+          cx.lineTo(ox-s*0.2,oy+s*0.8);cx.lineTo(ox+s*0.05,oy+s*0.05);
+          cx.lineTo(ox-s*0.25,oy+s*0.05);cx.closePath();cx.fill();
+        }else{
+          // Paintbrush
+          const s=optR*0.45;
+          cx.save();cx.translate(ox,oy);cx.rotate(-0.4);
+          cx.fillStyle='rgba(255,255,255,0.7)';
+          cx.beginPath();cx.roundRect(-s*0.1,-s*0.75,s*0.2,s*0.55,s*0.04);cx.fill();
+          cx.fillStyle='rgba(255,255,255,0.95)';
+          cx.beginPath();cx.moveTo(-s*0.3,s*0.0);cx.lineTo(s*0.3,s*0.0);
+          cx.lineTo(s*0.24,s*0.7);cx.lineTo(-s*0.24,s*0.7);cx.closePath();cx.fill();
+          cx.restore();
+        }
+        // Label
+        cx.font=`bold ${Math.round(optR*0.4)}px ${f2}`;cx.textAlign='center';
+        cx.fillStyle='rgba(255,255,255,0.9)';
+        cx.fillText(opts[i]==='shatter'?'Shatter':'Repaint',ox,oy+optR+Math.round(optR*0.55));
+      }
+      // Highlight source gem
+      cx.strokeStyle='rgba(255,255,255,0.6)';cx.lineWidth=2;
+      cx.beginPath();cx.arc(lpX,lpY,cSz*0.5,0,Math.PI*2);cx.stroke();
+    }
+  }
 }
 
 // ================================================================
@@ -4047,6 +4232,7 @@ function drawTopBar(){
   const totalBtnW=btnSz*4+btnGap*3;
   const btnStartX=Math.floor((W-totalBtnW)/2);
   const btnY=panelY+panelH+R(4);
+  topButtonsBottomY=btnY+btnSz;
 
   const btns=[
     {ref:'rules',dim:false},
@@ -4128,6 +4314,49 @@ function drawTopBar(){
 // ================================================================
 //  BOTTOM PANEL
 // ================================================================
+function drawMessageTicker(){
+  // Slim 2-line ticker between the top bar and the board, fade-in/fade-out in place.
+  // Always shows up to 2 most recent messages; nothing rendered if no messages.
+  if(panelMsgs.length===0)return;
+  const f='"SF Pro Display","Segoe UI",system-ui,sans-serif';
+  const s=uiS,R=n=>Math.round(n*s);
+  const tW=Math.min(R(380),W-R(40)),tH=R(40),rad=R(10);
+  const tx=Math.floor((W-tW)/2),ty=topButtonsBottomY+R(8); // sits cleanly below the top button row
+  const now=performance.now();
+  // Determine which messages to show — last 2 that are still alive
+  const live=[];
+  for(let i=panelMsgs.length-1;i>=0&&live.length<2;i--){
+    const m=panelMsgs[i];
+    const age=(now-m.addedAt)/m.duration;
+    if(age<=1)live.unshift({m,age});
+  }
+  if(live.length===0)return;
+  // Compute fade alpha for the panel itself based on the freshest message
+  const newest=live[live.length-1];
+  const panelAlpha=newest.age<.7?1:Math.max(0,(1-newest.age)/.3);
+  cx.save();
+  cx.globalAlpha=panelAlpha*0.92;
+  // Frosted glass background
+  const gf=cx.createLinearGradient(tx,ty,tx,ty+tH);
+  gf.addColorStop(0,'rgba(16,20,48,0.7)');gf.addColorStop(1,'rgba(18,22,52,0.75)');
+  cx.fillStyle=gf;cx.beginPath();cx.roundRect(tx,ty,tW,tH,rad);cx.fill();
+  cx.strokeStyle='rgba(120,140,200,0.25)';cx.lineWidth=0.7;
+  cx.beginPath();cx.roundRect(tx,ty,tW,tH,rad);cx.stroke();
+  cx.restore();
+  // Draw up to 2 lines, top = older, bottom = newer
+  cx.textAlign='center';
+  for(let i=0;i<live.length;i++){
+    const{m,age}=live[i];
+    const lineAlpha=age<.7?1:Math.max(0,(1-age)/.3);
+    const lineY=live.length===1?ty+tH/2+R(4):(i===0?ty+R(15):ty+R(30));
+    const fontSize=live.length===1?R(14):R(12);
+    cx.globalAlpha=lineAlpha;
+    cx.font=`bold ${fontSize}px ${f}`;cx.fillStyle=m.color;
+    cx.fillText(m.text,W/2,lineY);
+  }
+  cx.globalAlpha=1;
+}
+
 function drawBottomPanel(){
   const f='"SF Pro Display","Segoe UI",system-ui,sans-serif';
   const s=uiS,R=n=>Math.round(n*s);
@@ -4146,57 +4375,26 @@ function drawBottomPanel(){
   cx.strokeStyle='rgba(80,100,160,0.12)';cx.lineWidth=0.5;cx.beginPath();cx.roundRect(mx,panelY,panelW,panelH,rad);cx.stroke();
   cx.restore();
 
-  // Messages area — clipped above orb zone
-  const orbZoneTop=panelY+panelH-R(22)-R(14)-R(6);
-  let msgY=panelY+R(18);
-  for(let i=panelMsgs.length-1;i>=0&&msgY<orbZoneTop;i--){
-    const m=panelMsgs[i],age=(now-m.addedAt)/m.duration;
-    cx.globalAlpha=age<.7?1:Math.max(0,(1-age)/.3);
-    cx.font=`bold ${R(13)}px ${f}`;cx.textAlign='center';cx.fillStyle=m.color;
-    cx.fillText(m.text,W/2,msgY);msgY+=R(17);
-  }
-  cx.globalAlpha=1;
+  // (Messages now render in drawMessageTicker above the board, leaving the bottom panel symmetric.)
 
-  // --- LEFT ZONE: chain clear info ---
+  // --- LEFT ZONE: CHAIN CLEAR @ N (always visible, matched to right-side fragment badges) ---
   const cct=colorClearThreshold();
-  const leftZoneX=mx+R(10),leftZoneCY=panelY+panelH/2+R(2);
+  const leftZoneX=mx+R(12),leftZoneCY=panelY+R(20);
   cx.textAlign='left';
-  if(chain.length>0){
-    const cl=chain.length;
-    if(cl>=CFG.MIN_CHAIN){
-      const pts=calcScore(cl),bonus=calcTimeBonus(cl);
-      cx.font=`bold ${R(15)}px ${f}`;cx.fillStyle='#aaffcc';
-      cx.fillText('+'+pts,leftZoneX,leftZoneCY-R(2));
-      if(bonus>0){
-        cx.font=`bold ${R(11)}px ${f}`;cx.fillStyle='#ffdd88';
-        cx.fillText('+'+bonus+'s',leftZoneX,leftZoneCY+R(13));
-      }
-      if(cl>=cct){
-        cx.font=`bold ${R(10)}px ${f}`;cx.fillStyle='#88eeff';
-        cx.fillText('✦ COLOR CLEAR',leftZoneX,leftZoneCY+R(bonus>0?26:13));
-      }
-    }else{
-      cx.font=`bold ${R(11)}px ${f}`;cx.fillStyle='rgba(140,160,200,0.55)';
-      cx.fillText('Chain: '+cl,leftZoneX,leftZoneCY+R(4));
-    }
-  }else{
-    cx.font=`${R(9)}px ${f}`;cx.fillStyle='rgba(140,160,200,0.5)';
-    cx.fillText('CHAIN CLEAR',leftZoneX,leftZoneCY-R(4));
-    cx.font=`bold ${R(13)}px ${f}`;cx.fillStyle='rgba(160,180,220,0.7)';
-    cx.fillText('@ '+cct,leftZoneX,leftZoneCY+R(11));
-  }
+  cx.font=`bold ${R(12)}px ${f}`;cx.fillStyle='rgba(180,200,235,0.85)';
+  cx.fillText('CHAIN CLEAR @ '+cct,leftZoneX,leftZoneCY+R(4));
 
   // --- RIGHT ZONE: focused fragment indicators (max 3) ---
   // Only show after oculus has been visited at least once and player has focused windows
   const focused=[];
   for(let i=0;i<9;i++)if(catProg[i]&&catProg[i].foc)focused.push(i);
   if(tutSeen['oculus_visited']&&focused.length>0){
-    const badgeR=R(11),badgeGap=R(7);
+    const badgeR=R(11),badgeGap=R(20);
     const badgeCount=Math.min(3,focused.length);
     const totalBadgeW=badgeCount*(badgeR*2)+(badgeCount-1)*badgeGap;
     const rightZoneRight=mx+panelW-R(10);
     const startBX=rightZoneRight-totalBadgeW+badgeR;
-    const badgeCY=panelY+panelH/2-R(2);
+    const badgeCY=panelY+R(18);
     for(let i=0;i<badgeCount;i++){
       const wIdx=focused[i],w=CAT_W[wIdx],p=catProg[wIdx];
       const [r,g,b]=w.color;
@@ -5141,7 +5339,7 @@ function handleDown(e){const p=pos(e);
       addPanelMsg("Pre-game popup disabled (re-enable in Oculus)",'#aaccee',2500);
     }
     loadoutPopupActive=false;
-    if(pauseStartTime>0){totalPausedMs+=performance.now()-pauseStartTime;pauseStartTime=0;}
+    if(pauseStartTime>0){resumeAnimAfterPause();totalPausedMs+=performance.now()-pauseStartTime;pauseStartTime=0;}
     const now=performance.now();
     lastTimerTick=now;lastHeatCoolTick=now;lastActionTime=now;
     return;
@@ -5170,7 +5368,7 @@ function handleDown(e){const p=pos(e);
     paused=!paused;pauseConfirm=null;
     if(paused){pauseStartTime=performance.now();}
     if(!paused){
-      if(pauseStartTime>0)totalPausedMs+=performance.now()-pauseStartTime;pauseStartTime=0;
+      if(pauseStartTime>0){resumeAnimAfterPause();totalPausedMs+=performance.now()-pauseStartTime;}pauseStartTime=0;
       const now=performance.now();
       lastTimerTick=now;lastHeatCoolTick=now;lastActionTime=now;
       lastPowerSpawn=now;lastCurseSpawn=now;lastRainbowSpawn=now;lastBlazeSpawn=now;lastHourglassSpawn=now;
@@ -5220,7 +5418,7 @@ function handleDown(e){const p=pos(e);
     }
     if(hitBtn(btnBackMenu,p)){pauseConfirm='quit';return;}
     paused=false;
-    if(pauseStartTime>0)totalPausedMs+=performance.now()-pauseStartTime;pauseStartTime=0;
+    if(pauseStartTime>0){resumeAnimAfterPause();totalPausedMs+=performance.now()-pauseStartTime;}pauseStartTime=0;
     const now=performance.now();
     lastTimerTick=now;lastHeatCoolTick=now;lastActionTime=now;
     lastPowerSpawn=now;lastCurseSpawn=now;lastRainbowSpawn=now;lastBlazeSpawn=now;lastHourglassSpawn=now;
@@ -5294,15 +5492,55 @@ function handleDown(e){const p=pos(e);
     if(hitBtn(btnShatter,p)&&shatterCharges>0){shatterMode=true;deadlocked=false;return;}
     return;}
   if(shatterMode){const si=slotAtPx(p.x,p.y);if(si<0){shatterMode=false;return;}}
+  // Long-press menu: if shatter or repaint charges available, delay chain start
+  if(lpMenuActive){
+    // Tap on menu option
+    const dx=p.x-lpX,dy=p.y-lpY;
+    const hasSh=shatterCharges>0&&animPhase==='idle';
+    const hasRp=repaintCharges>0&&animPhase==='idle';
+    const opts=[];
+    if(hasSh)opts.push('shatter');
+    if(hasRp)opts.push('repaint');
+    const optR=cSz*0.7,optDist=cSz*1.6;
+    let hit=false;
+    for(let i=0;i<opts.length;i++){
+      const angle=opts.length===1?-Math.PI/2:(i===0?-Math.PI*0.7:-Math.PI*0.3);
+      const ox=lpX+Math.cos(angle)*optDist,oy=lpY+Math.sin(angle)*optDist;
+      if(Math.hypot(p.x-ox,p.y-oy)<optR*1.5){
+        hit=true;
+        if(opts[i]==='shatter'){lpMenuActive=false;useShatter(lpSlot);}
+        else{lpMenuActive=false;repaintMode=true;shatterMode=false;repaintSelected=[lpSlot];repaintDragging=true;}
+        break;
+      }
+    }
+    if(!hit)lpMenuActive=false;
+    return;
+  }
+  if(!shatterMode&&!repaintMode&&animPhase==='idle'&&!gameOver&&!paused&&(shatterCharges>0||repaintCharges>0)){
+    const si=slotAtPx(p.x,p.y);
+    if(si>=0&&!slots[si].isHole){
+      lpStartPos={x:p.x,y:p.y};lpSlot=si;
+      lpTimer=setTimeout(()=>{
+        lpTimer=null;
+        lpX=slots[si].seedX;lpY=slots[si].seedY;
+        lpMenuActive=true;
+        endC(); // cancel any chain that started
+      },400);
+    }
+  }
   startC(p.x,p.y);}
 function closeRules(){
   showRules=false;rulesScrollY=0;
-  if(pauseStartTime>0){totalPausedMs+=performance.now()-pauseStartTime;pauseStartTime=0;}
+  if(pauseStartTime>0){resumeAnimAfterPause();totalPausedMs+=performance.now()-pauseStartTime;pauseStartTime=0;}
   const now=performance.now();lastTimerTick=now;lastHeatCoolTick=now;lastActionTime=now;
   lastPowerSpawn=now;lastCurseSpawn=now;lastRainbowSpawn=now;lastBlazeSpawn=now;lastHourglassSpawn=now;
   for(const s of slots)if(s.special)s.specialTick=now;
 }
 function handleMove(px,py){
+  // Cancel long-press if finger moved
+  if(lpTimer&&lpStartPos&&Math.hypot(px-lpStartPos.x,py-lpStartPos.y)>8){
+    clearTimeout(lpTimer);lpTimer=null;lpStartPos=null;
+  }
   if(showRules){
     const dy=rulesTouchStartY-py;
     if(Math.abs(dy)>3)rulesTouchDragged=true;
@@ -5332,6 +5570,8 @@ function handleMove(px,py){
   moveC(px,py);
 }
 function handleUp(){
+  if(lpTimer){clearTimeout(lpTimer);lpTimer=null;lpStartPos=null;}
+  if(lpMenuActive)return; // menu stays open after lift
   if(showRules){
     if(!rulesTouchDragged&&performance.now()-rulesOpenedAt>300)closeRules();
     return;
