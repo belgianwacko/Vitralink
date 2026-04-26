@@ -3318,7 +3318,7 @@ function catDrawDetail(cX,cY,R,f,Rn){
   const ec=catProg.filter(p=>p.eq).length;
   const fc=catProg.filter(p=>p.foc).length;
   const canUnlock=p.tier<3&&p.frags>=CAT_TIERS[p.tier].c;
-  const showFocus=p.tier<3;
+  const showFocus=p.tier<3||p.foc; // show for maxed windows too if focused (to allow unfocus)
   // Panel — height adapts to content
   const pw=Math.min(Rn(320),W*0.85);
   const ph=Rn(showFocus?(canUnlock?320:280):(canUnlock?280:240));
@@ -5320,8 +5320,8 @@ function handleDown(e){const p=pos(e);
     if(hitBtn(catBtnModeSelect,p)){showModeSelect=false;showOculus=true;catLoad();tutSeen['oculus_visited']=true;saveTut();return;}
     for(const mb of modeButtons){
       if(p.x>=mb.x&&p.x<=mb.x+mb.w&&p.y>=mb.y&&p.y<=mb.y+mb.h){
-        // If oculus is unlocked but no windows are focused, redirect
-        if(hasAllModes()&&catProg.filter(cp=>cp.foc).length===0){
+        // If oculus is unlocked but no windows are focused (and not all maxed), redirect
+        if(hasAllModes()&&catProg.filter(cp=>cp.foc).length===0&&!catProg.every(cp=>cp.tier>=3)){
           showModeSelect=false;showOculus=true;catLoad();catHelpOpen=true;tutSeen['oculus_visited']=true;saveTut();return;
         }
         gameMode=mb.mode;showModeSelect=false;initAudio();initBoard();return;
@@ -5437,7 +5437,7 @@ function handleDown(e){const p=pos(e);
     if(hitBtn(btnGameOverDetails,p)){gameOverDetailsOpen=true;return;}
     if(hitBtn(btnGameOverReplay,p)){
       // Replay current mode — but if Oculus unlocked and no windows focused, redirect
-      if(hasAllModes()&&catProg.filter(cp=>cp.foc).length===0){
+      if(hasAllModes()&&catProg.filter(cp=>cp.foc).length===0&&!catProg.every(cp=>cp.tier>=3)){
         stopMusic();gameOver=false;showOculus=true;catLoad();catHelpOpen=true;tutSeen['oculus_visited']=true;saveTut();return;
       }
       stopMusic();initAudio();initBoard();return;
